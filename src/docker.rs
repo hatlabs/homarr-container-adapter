@@ -12,6 +12,7 @@ use crate::error::{AdapterError, Result};
 
 /// Discovered app from Docker labels
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiscoveredApp {
     pub container_id: String,
     pub container_name: String,

@@ -6,7 +6,6 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::branding::BrandingConfig;
-use crate::config::Config;
 use crate::docker::DiscoveredApp;
 use crate::error::{AdapterError, Result};
 
@@ -17,6 +16,7 @@ pub struct HomarrClient {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct OnboardingStep {
     pub current: String,
     pub previous: Option<String>,
@@ -44,6 +44,7 @@ struct CsrfResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BoardResponse {
     id: String,
     name: String,
@@ -62,6 +63,7 @@ struct Section {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct Layout {
     id: String,
     name: String,
@@ -77,6 +79,7 @@ struct CreateBoardResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CreateAppResponse {
     #[serde(rename = "appId")]
     app_id: String,

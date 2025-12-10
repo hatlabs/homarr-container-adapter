@@ -77,6 +77,7 @@ impl State {
     }
 
     /// Mark an app as removed by user
+    #[allow(dead_code)]
     pub fn mark_removed(&mut self, app_id: &str) {
         self.removed_apps.insert(app_id.to_string());
     }

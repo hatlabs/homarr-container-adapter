@@ -210,6 +210,8 @@ async fn run_sync(config: &Config) -> Result<()> {
     if !state.first_boot_completed {
         info!("First boot detected, running setup");
         run_setup(config).await?;
+        // Reload state after setup (it saved first_boot_completed = true)
+        state = state::State::load(&config.state_file)?;
     }
 
     // Load branding

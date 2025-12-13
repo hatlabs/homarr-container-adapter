@@ -45,6 +45,13 @@ pub async fn discover_apps(config: &Config) -> Result<Vec<DiscoveredApp>> {
         if let Some(labels) = container.labels {
             // Check if this container has homarr.enable=true
             if labels.get("homarr.enable") == Some(&"true".to_string()) {
+                // Skip Homarr itself - no point linking to itself
+                let name = labels.get("homarr.name").map(|s| s.to_lowercase());
+                if name == Some("homarr".to_string()) {
+                    tracing::debug!("Skipping Homarr container (self-reference)");
+                    continue;
+                }
+
                 if let Some(app) = parse_homarr_labels(&container.id.unwrap_or_default(), &labels) {
                     tracing::debug!("Discovered app: {:?}", app);
                     apps.push(app);
@@ -114,6 +121,13 @@ pub async fn get_container_app(
 
     // Check if this container has homarr.enable=true
     if labels.get("homarr.enable") == Some(&"true".to_string()) {
+        // Skip Homarr itself - no point linking to itself
+        let name = labels.get("homarr.name").map(|s| s.to_lowercase());
+        if name == Some("homarr".to_string()) {
+            tracing::debug!("Skipping Homarr container (self-reference)");
+            return Ok(None);
+        }
+
         Ok(parse_homarr_labels(container_id, &labels))
     } else {
         Ok(None)

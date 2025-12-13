@@ -346,8 +346,9 @@ impl HomarrClient {
                 "items": [{
                     "id": format!("cockpit-{}", app_id),
                     "kind": "app",
-                    "appId": app_id,
-                    "options": {},
+                    "options": {
+                        "appId": app_id
+                    },
                     "layouts": [{
                         "layoutId": layout_id,
                         "sectionId": section_id,
@@ -465,8 +466,9 @@ impl HomarrClient {
         items.push(json!({
             "id": format!("discovered-{}", app.container_id),
             "kind": "app",
-            "appId": app_id,
-            "options": {},
+            "options": {
+                "appId": app_id
+            },
             "layouts": [{
                 "layoutId": layout_id,
                 "sectionId": section_id,

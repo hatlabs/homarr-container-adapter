@@ -637,7 +637,8 @@ mod tests {
 
     #[test]
     fn test_client_new_preserves_path() {
-        let client = HomarrClient::new("http://localhost:7575/homarr", "http://localhost:8771").unwrap();
+        let client =
+            HomarrClient::new("http://localhost:7575/homarr", "http://localhost:8771").unwrap();
         assert_eq!(client.base_url, "http://localhost:7575/homarr");
     }
 
@@ -833,7 +834,10 @@ mod tests {
     #[test]
     fn test_transform_icon_url_https_passthrough() {
         // HTTPS URLs should pass through unchanged
-        let result = transform_icon_url("https://cdn.example.com/icons/docker.svg", TEST_ASSET_SERVER);
+        let result = transform_icon_url(
+            "https://cdn.example.com/icons/docker.svg",
+            TEST_ASSET_SERVER,
+        );
         assert_eq!(result, "https://cdn.example.com/icons/docker.svg");
     }
 

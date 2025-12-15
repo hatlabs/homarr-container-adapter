@@ -1,0 +1,24 @@
+# Homarr Container Adapter Configuration
+#
+# This file configures the homarr-container-adapter service.
+# Location: /etc/homarr-container-adapter/config.toml
+
+# Homarr API URL (internal, container-to-container)
+homarr_url = "http://localhost:80"
+
+# Asset server URL for icons (must be accessible from the browser)
+# The asset server runs on port 8771 and serves icons from /usr/share/pixmaps
+# This URL is embedded in Homarr tiles, so it must be reachable from the user's browser.
+asset_server_url = "http://halos.local:8771"
+
+# Path to branding configuration
+branding_file = "/etc/halos-homarr-branding/branding.toml"
+
+# Path to state file (tracks discovered apps)
+state_file = "/var/lib/homarr-container-adapter/state.json"
+
+# Docker socket path
+docker_socket = "/var/run/docker.sock"
+
+# Enable debug logging (set to true for troubleshooting)
+debug = false

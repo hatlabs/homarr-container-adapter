@@ -14,6 +14,11 @@ pub struct Config {
     #[serde(default = "default_homarr_url")]
     pub homarr_url: String,
 
+    /// Asset server base URL for serving icons
+    /// This server hosts /icons/ from /usr/share/pixmaps
+    #[serde(default = "default_asset_server_url")]
+    pub asset_server_url: String,
+
     /// Path to branding config file
     #[serde(default = "default_branding_file")]
     pub branding_file: String,
@@ -35,6 +40,10 @@ fn default_homarr_url() -> String {
     "http://localhost:80".to_string()
 }
 
+fn default_asset_server_url() -> String {
+    "http://localhost:8771".to_string()
+}
+
 fn default_branding_file() -> String {
     "/etc/halos-homarr-branding/branding.toml".to_string()
 }
@@ -51,6 +60,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             homarr_url: default_homarr_url(),
+            asset_server_url: default_asset_server_url(),
             branding_file: default_branding_file(),
             state_file: default_state_file(),
             docker_socket: default_docker_socket(),

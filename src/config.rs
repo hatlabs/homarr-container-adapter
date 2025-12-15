@@ -1,5 +1,6 @@
 //! Adapter configuration
 
+use gethostname::gethostname;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -41,7 +42,11 @@ fn default_homarr_url() -> String {
 }
 
 fn default_asset_server_url() -> String {
-    "http://localhost:8771".to_string()
+    let hostname = gethostname()
+        .into_string()
+        .unwrap_or_else(|_| "localhost".to_string());
+    // Use mDNS .local suffix for local network access
+    format!("http://{}.local:8771", hostname)
 }
 
 fn default_branding_file() -> String {

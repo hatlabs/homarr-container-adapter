@@ -74,20 +74,6 @@ pub struct Board {
     pub display_name: String,
     pub column_count: u8,
     pub is_public: bool,
-    pub cockpit: CockpitTile,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CockpitTile {
-    pub enabled: bool,
-    pub name: String,
-    pub description: String,
-    pub href: String,
-    pub icon_url: String,
-    pub width: u8,
-    pub height: u8,
-    pub x_offset: u8,
-    pub y_offset: u8,
 }
 
 #[derive(Debug, Deserialize)]

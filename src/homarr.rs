@@ -436,7 +436,10 @@ impl HomarrClient {
         // Check if Cockpit app already exists (by URL)
         let existing_apps = self.get_all_apps().await.unwrap_or_default();
         if let Some(existing) = Self::find_app_in_list(&existing_apps, &cockpit.href) {
-            tracing::info!("Cockpit app already exists (app_id: {}), skipping creation", existing.id);
+            tracing::info!(
+                "Cockpit app already exists (app_id: {}), skipping creation",
+                existing.id
+            );
             return Ok(());
         }
 

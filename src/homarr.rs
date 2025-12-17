@@ -118,7 +118,7 @@ fn derive_ping_url(app_url: &str) -> Option<String> {
 }
 
 /// Simple hash function for generating unique IDs from URLs
-fn md5_hash(s: &str) -> u64 {
+fn string_hash(s: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -649,7 +649,7 @@ impl HomarrClient {
         let item_id = if let Some(container) = app.container_name() {
             format!("registry-{}", container)
         } else {
-            format!("registry-{:x}", md5_hash(&app.url))
+            format!("registry-{:x}", string_hash(&app.url))
         };
 
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);

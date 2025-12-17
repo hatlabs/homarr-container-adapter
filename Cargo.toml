@@ -3,14 +3,13 @@ name = "homarr-container-adapter"
 version = "0.1.0"
 edition = "2021"
 authors = ["Hat Labs Ltd <info@hatlabs.fi>"]
-description = "Adapter for Homarr dashboard: first-boot setup and container auto-discovery"
+description = "Adapter for Homarr dashboard: first-boot setup and app registry sync"
 license = "MIT"
 repository = "https://github.com/hatlabs/homarr-container-adapter"
 
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-futures-util = "0.3"
 
 # HTTP client for Homarr API
 reqwest = { version = "0.12", features = ["json", "cookies"] }

@@ -2,27 +2,26 @@
 //!
 //! This service provides:
 //! - First-boot setup: Completes Homarr onboarding with HaLOS branding
-//! - Auto-discovery: Watches Docker containers and adds them to Homarr dashboard in real-time
+//! - App registry: Syncs apps from /etc/halos/webapps.d/ to Homarr dashboard
 
 mod branding;
 mod config;
 mod docker;
 mod error;
 mod homarr;
+mod registry;
 mod state;
 
 use clap::{Parser, Subcommand};
-use tokio::sync::mpsc;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
-use crate::docker::ContainerEvent;
 use crate::error::Result;
 
 #[derive(Parser)]
 #[command(name = "homarr-container-adapter")]
-#[command(about = "Adapter for Homarr dashboard: first-boot setup and auto-discovery")]
+#[command(about = "Adapter for Homarr dashboard: first-boot setup and app registry sync")]
 #[command(version)]
 struct Cli {
     /// Config file path
@@ -43,10 +42,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Watch Docker events and sync containers in real-time (main daemon mode)
-    Watch,
-
-    /// Run a single sync cycle (scan all containers once)
+    /// Run a sync cycle (load registry and sync to Homarr)
     Sync,
 
     /// Run first-boot setup only
@@ -72,10 +68,6 @@ async fn main() -> Result<()> {
     let config = Config::load(&cli.config)?;
 
     match cli.command {
-        Commands::Watch => {
-            info!("Starting watch mode");
-            run_watch(&config).await?;
-        }
         Commands::Sync => {
             info!("Running sync cycle");
             run_sync(&config).await?;
@@ -89,152 +81,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    Ok(())
-}
-
-/// Main watch loop - monitors Docker events and syncs in real-time
-async fn run_watch(config: &Config) -> Result<()> {
-    // Ensure first-boot setup is done
-    let mut state = state::State::load(&config.state_file).unwrap_or_default();
-
-    if !state.first_boot_completed {
-        info!("First boot detected, running setup");
-        run_setup(config).await?;
-        state = state::State::load(&config.state_file).unwrap_or_default();
-    }
-
-    // Load branding for board name
-    let branding = branding::BrandingConfig::load(&config.branding_file)?;
-
-    // Create Homarr client and login
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
-    client.ensure_logged_in(&branding).await?;
-
-    // Do initial sync of existing containers
-    info!("Initial sync of existing containers");
-    let discovered = docker::discover_apps(config).await?;
-    // Pre-fetch existing apps for efficient deduplication
-    let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
-        warn!("Failed to fetch existing apps: {}", e);
-        vec![]
-    });
-    for app in &discovered {
-        // Use URL as key for deduplication (container_id changes on restart)
-        if let Some(existing) = state.discovered_apps.get_mut(&app.url) {
-            // App already tracked - update container_id if it changed (container restart)
-            if existing.container_id != app.container_id {
-                existing.container_id = app.container_id.clone();
-                state.save(&config.state_file)?;
-            }
-        } else {
-            match client
-                .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
-                .await
-            {
-                Ok(_) => {
-                    state.discovered_apps.insert(
-                        app.url.clone(),
-                        state::DiscoveredApp {
-                            name: app.name.clone(),
-                            container_id: app.container_id.clone(),
-                            added_at: chrono::Utc::now(),
-                        },
-                    );
-                    state.save(&config.state_file)?;
-                }
-                Err(e) => {
-                    warn!("Failed to add app '{}': {}", app.name, e);
-                }
-            }
-        }
-    }
-
-    // Start watching Docker events
-    let (tx, mut rx) = mpsc::channel::<ContainerEvent>(32);
-
-    // Spawn event watcher task
-    let watch_config = config.clone();
-    tokio::spawn(async move {
-        if let Err(e) = docker::watch_events(&watch_config, tx).await {
-            tracing::error!("Docker event watcher failed: {}", e);
-        }
-    });
-
-    // Process events
-    info!("Watching for Docker container events...");
-    while let Some(event) = rx.recv().await {
-        match event {
-            ContainerEvent::Started(app) => {
-                // Check if already tracked (by URL, not container_id)
-                if let Some(existing) = state.discovered_apps.get_mut(&app.url) {
-                    // App already tracked - update container_id if changed (container restart)
-                    if existing.container_id != app.container_id {
-                        info!(
-                            "App '{}' restarted with new container_id, updating",
-                            app.name
-                        );
-                        existing.container_id = app.container_id.clone();
-                        if let Err(e) = state.save(&config.state_file) {
-                            warn!("Failed to save state: {}", e);
-                        }
-                    } else {
-                        info!("App '{}' already tracked, skipping", app.name);
-                    }
-                    continue;
-                }
-
-                // Check if user removed it (by URL)
-                if state.is_removed(&app.url) {
-                    info!("App '{}' was removed by user, skipping", app.name);
-                    continue;
-                }
-
-                // Re-login in case session expired
-                if let Err(e) = client.ensure_logged_in(&branding).await {
-                    warn!("Failed to login: {}", e);
-                    continue;
-                }
-
-                // Add to Homarr (no cached list for single event)
-                match client
-                    .add_discovered_app(&app, &branding.board.name, None)
-                    .await
-                {
-                    Ok(_) => {
-                        state.discovered_apps.insert(
-                            app.url.clone(),
-                            state::DiscoveredApp {
-                                name: app.name.clone(),
-                                container_id: app.container_id.clone(),
-                                added_at: chrono::Utc::now(),
-                            },
-                        );
-                        state.update_sync_time();
-                        if let Err(e) = state.save(&config.state_file) {
-                            warn!("Failed to save state: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to add app '{}' to Homarr: {}", app.name, e);
-                    }
-                }
-            }
-            ContainerEvent::Stopped(container_id) => {
-                // Log container stop but don't remove from Homarr
-                // (apps may restart, user can remove manually if needed)
-                // Note: We now track by URL, so we search by container_id in values
-                let stopped_app = state
-                    .discovered_apps
-                    .values()
-                    .find(|a| a.container_id == container_id);
-                if let Some(app) = stopped_app {
-                    info!("Container stopped: {} (keeping in Homarr)", app.name);
-                }
-            }
-        }
-    }
-
-    warn!("Event channel closed, exiting watch mode");
     Ok(())
 }
 
@@ -252,10 +98,6 @@ async fn run_sync(config: &Config) -> Result<()> {
     // Load branding
     let branding = branding::BrandingConfig::load(&config.branding_file)?;
 
-    // Scan Docker containers
-    info!("Scanning Docker containers");
-    let discovered = docker::discover_apps(config).await?;
-
     // Create client and login
     let client = homarr::HomarrClient::new(&config.homarr_url)?;
     client.ensure_logged_in(&branding).await?;
@@ -266,31 +108,42 @@ async fn run_sync(config: &Config) -> Result<()> {
         vec![]
     });
 
-    // Add new apps (use URL as key for deduplication)
-    for app in &discovered {
-        if let Some(existing) = state.discovered_apps.get_mut(&app.url) {
-            // App already tracked - update container_id if changed (container restart)
-            if existing.container_id != app.container_id {
-                existing.container_id = app.container_id.clone();
+    // Load and sync registry apps
+    info!("Loading apps from registry: {}", config.registry_dir);
+    let registry_apps = registry::load_all_apps(&config.registry_dir).unwrap_or_else(|e| {
+        warn!("Failed to load registry apps: {}", e);
+        vec![]
+    });
+
+    let mut synced_count = 0;
+    for entry in &registry_apps {
+        if state.is_removed(&entry.app.url) {
+            info!(
+                "Registry app '{}' was removed by user, skipping",
+                entry.app.name
+            );
+            continue;
+        }
+
+        match client
+            .add_registry_app(&entry.app, &branding.board.name, Some(&existing_apps))
+            .await
+        {
+            Ok(_) => {
+                // Track in state (use empty container_id for non-container apps)
+                let container_id = entry.app.container_name().unwrap_or("").to_string();
+                state.discovered_apps.insert(
+                    entry.app.url.clone(),
+                    state::DiscoveredApp {
+                        name: entry.app.name.clone(),
+                        container_id,
+                        added_at: chrono::Utc::now(),
+                    },
+                );
+                synced_count += 1;
             }
-        } else if !state.is_removed(&app.url) {
-            match client
-                .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
-                .await
-            {
-                Ok(_) => {
-                    state.discovered_apps.insert(
-                        app.url.clone(),
-                        state::DiscoveredApp {
-                            name: app.name.clone(),
-                            container_id: app.container_id.clone(),
-                            added_at: chrono::Utc::now(),
-                        },
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to add app '{}': {}", app.name, e);
-                }
+            Err(e) => {
+                warn!("Failed to add registry app '{}': {}", entry.app.name, e);
             }
         }
     }
@@ -298,7 +151,7 @@ async fn run_sync(config: &Config) -> Result<()> {
     state.update_sync_time();
     state.save(&config.state_file)?;
 
-    info!("Sync complete");
+    info!("Sync complete: {} apps synced from registry", synced_count);
     Ok(())
 }
 
@@ -337,14 +190,17 @@ async fn check_status(config: &Config) -> Result<()> {
     if state.first_boot_completed {
         println!("Status: First-boot setup completed");
         println!("Last sync: {:?}", state.last_sync);
-        println!("Discovered apps: {}", state.discovered_apps.len());
+        println!("Registered apps: {}", state.discovered_apps.len());
         for (url, app) in &state.discovered_apps {
-            println!(
-                "  - {} ({}) [{}]",
-                app.name,
-                url,
-                &app.container_id[..12.min(app.container_id.len())]
-            );
+            let container_info = if app.container_id.is_empty() {
+                "external".to_string()
+            } else {
+                format!(
+                    "container: {}",
+                    &app.container_id[..12.min(app.container_id.len())]
+                )
+            };
+            println!("  - {} ({}) [{}]", app.name, url, container_info);
         }
     } else {
         println!("Status: First-boot setup pending");

@@ -6,8 +6,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::branding::BrandingConfig;
-use crate::docker::DiscoveredApp;
 use crate::error::{AdapterError, Result};
+use crate::registry::AppDefinition;
 
 /// Homarr API client
 pub struct HomarrClient {
@@ -115,6 +115,15 @@ fn derive_ping_url(app_url: &str) -> Option<String> {
         }
         Err(_) => None,
     }
+}
+
+/// Simple hash function for generating unique IDs from URLs
+fn string_hash(s: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Check if a board already has an item for a given app ID.
@@ -301,7 +310,7 @@ impl HomarrClient {
         Ok(())
     }
 
-    /// Set up default board with Cockpit tile
+    /// Set up default board
     pub async fn setup_default_board(&self, branding: &BrandingConfig) -> Result<()> {
         // Login first
         self.login(branding).await?;
@@ -321,11 +330,6 @@ impl HomarrClient {
         // Apply board branding settings (page title, logo, colors, etc.)
         self.save_board_branding_settings(&board_id, branding)
             .await?;
-
-        // Create Cockpit app if it doesn't exist
-        if branding.board.cockpit.enabled {
-            self.ensure_cockpit_app(branding, &board_id).await?;
-        }
 
         // Set as home board
         self.set_home_board(&board_id).await?;
@@ -430,103 +434,6 @@ impl HomarrClient {
         Ok(trpc_response.result.data.json.board_id)
     }
 
-    /// Ensure Cockpit app exists and is on the board
-    async fn ensure_cockpit_app(&self, branding: &BrandingConfig, board_id: &str) -> Result<()> {
-        let cockpit = &branding.board.cockpit;
-
-        // Check if Cockpit app already exists (by URL)
-        let existing_apps = self.get_all_apps().await.unwrap_or_default();
-        if let Some(existing) = Self::find_app_in_list(&existing_apps, &cockpit.href) {
-            tracing::info!(
-                "Cockpit app already exists (app_id: {}), skipping creation",
-                existing.id
-            );
-            return Ok(());
-        }
-
-        // Create app with transformed icon URL
-        let url = format!("{}/api/trpc/app.create", self.base_url);
-        let icon_url = transform_icon_url(&cockpit.icon_url);
-        // Auto-derive pingUrl with host.docker.internal for container-to-host health checks
-        let ping_url = derive_ping_url(&cockpit.href);
-        let payload = json!({
-            "json": {
-                "name": cockpit.name,
-                "description": cockpit.description,
-                "iconUrl": icon_url,
-                "href": cockpit.href,
-                "pingUrl": ping_url
-            }
-        });
-
-        let response = self.client.post(&url).json(&payload).send().await?;
-
-        if response.status().is_success() {
-            let app_response: TrpcResponse<CreateAppResponse> = response.json().await?;
-            let app_id = app_response.result.data.json.app_id;
-
-            // Add to board
-            self.add_app_to_board(board_id, &app_id, branding).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Add an app to a board
-    async fn add_app_to_board(
-        &self,
-        board_id: &str,
-        app_id: &str,
-        branding: &BrandingConfig,
-    ) -> Result<()> {
-        // Get current board state
-        let board = self.get_board_by_name(&branding.board.name).await?;
-
-        let section_id = board
-            .sections
-            .first()
-            .map(|s| s.id.clone())
-            .unwrap_or_default();
-        let layout_id = board
-            .layouts
-            .first()
-            .map(|l| l.id.clone())
-            .unwrap_or_default();
-
-        let cockpit = &branding.board.cockpit;
-
-        let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
-        let payload = json!({
-            "json": {
-                "id": board_id,
-                "sections": board.sections,
-                "items": [{
-                    "id": format!("cockpit-{}", app_id),
-                    "kind": "app",
-                    "options": {
-                        "appId": app_id
-                    },
-                    "layouts": [{
-                        "layoutId": layout_id,
-                        "sectionId": section_id,
-                        "width": cockpit.width,
-                        "height": cockpit.height,
-                        "xOffset": cockpit.x_offset,
-                        "yOffset": cockpit.y_offset
-                    }],
-                    "integrationIds": [],
-                    "advancedOptions": {
-                        "customCssClasses": []
-                    }
-                }],
-                "integrations": []
-            }
-        });
-
-        self.client.post(&url).json(&payload).send().await?;
-        Ok(())
-    }
-
     /// Set home board
     async fn set_home_board(&self, board_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/board.setHomeBoard", self.base_url);
@@ -574,12 +481,96 @@ impl HomarrClient {
         apps.iter().find(|app| app.href.as_deref() == Some(url))
     }
 
-    /// Update an existing app
-    async fn update_app(&self, app_id: &str, app: &DiscoveredApp) -> Result<()> {
+    /// Add a registry app to Homarr (or update if already exists)
+    ///
+    /// Registry apps can have explicit layout positioning and may not be Docker containers.
+    pub async fn add_registry_app(
+        &self,
+        app: &AppDefinition,
+        board_name: &str,
+        existing_apps: Option<&[SelectableApp]>,
+    ) -> Result<String> {
+        // Check if an app with the same URL already exists
+        let existing = match existing_apps {
+            Some(apps) => Self::find_app_in_list(apps, &app.url).cloned(),
+            None => match self.get_all_apps().await {
+                Ok(apps) => Self::find_app_in_list(&apps, &app.url).cloned(),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to fetch existing apps for deduplication: {}. \
+                             Proceeding with create.",
+                        e
+                    );
+                    None
+                }
+            },
+        };
+
+        if let Some(existing_app) = existing {
+            // App already exists - update it and ensure it's on the board
+            self.update_registry_app(&existing_app.id, app).await?;
+            self.add_registry_app_to_board(&existing_app.id, app, board_name)
+                .await?;
+            return Ok(existing_app.id);
+        }
+
+        // Create new app in Homarr
+        let url = format!("{}/api/trpc/app.create", self.base_url);
+        let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));
+
+        // Use explicit ping_url if provided, otherwise derive from URL
+        // For external apps, don't set a ping URL (no health checks)
+        let ping_url = if app.is_external() {
+            None
+        } else {
+            app.ping_url.clone().or_else(|| derive_ping_url(&app.url))
+        };
+
+        let payload = json!({
+            "json": {
+                "name": app.name,
+                "description": app.description.clone().unwrap_or_default(),
+                "iconUrl": icon_url,
+                "href": app.url,
+                "pingUrl": ping_url
+            }
+        });
+
+        let response = self.client.post(&url).json(&payload).send().await?;
+
+        if !response.status().is_success() {
+            let text = response.text().await?;
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to create registry app '{}': {}",
+                app.name, text
+            )));
+        }
+
+        let app_response: TrpcResponse<CreateAppResponse> = response.json().await?;
+        let app_id = app_response.result.data.json.app_id;
+
+        // Add to board with layout preferences
+        self.add_registry_app_to_board(&app_id, app, board_name)
+            .await?;
+
+        tracing::info!(
+            "Added registry app '{}' to Homarr (app_id: {})",
+            app.name,
+            app_id
+        );
+        Ok(app_id)
+    }
+
+    /// Update an existing app with registry app data
+    async fn update_registry_app(&self, app_id: &str, app: &AppDefinition) -> Result<()> {
         let url = format!("{}/api/trpc/app.update", self.base_url);
         let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));
-        // Auto-derive pingUrl with host.docker.internal for container-to-host health checks
-        let ping_url = derive_ping_url(&app.url).unwrap_or_default();
+
+        let ping_url = if app.is_external() {
+            None
+        } else {
+            app.ping_url.clone().or_else(|| derive_ping_url(&app.url))
+        };
 
         let payload = json!({
             "json": {
@@ -597,114 +588,38 @@ impl HomarrClient {
         if !response.status().is_success() {
             let text = response.text().await?;
             return Err(AdapterError::HomarrApi(format!(
-                "Failed to update app '{}': {}",
+                "Failed to update registry app '{}': {}",
                 app.name, text
             )));
         }
 
-        tracing::info!("Updated existing app '{}' (app_id: {})", app.name, app_id);
+        tracing::info!(
+            "Updated existing registry app '{}' (app_id: {})",
+            app.name,
+            app_id
+        );
         Ok(())
     }
 
-    /// Add a discovered app to Homarr (or update if already exists)
-    ///
-    /// If `existing_apps` is provided, it will be used for deduplication lookup
-    /// instead of fetching from the API. This improves performance when adding
-    /// multiple apps in a batch.
-    pub async fn add_discovered_app(
-        &self,
-        app: &DiscoveredApp,
-        board_name: &str,
-        existing_apps: Option<&[SelectableApp]>,
-    ) -> Result<String> {
-        // Check if an app with the same URL already exists
-        let existing = match existing_apps {
-            Some(apps) => Self::find_app_in_list(apps, &app.url).cloned(),
-            None => {
-                // Fetch apps for deduplication check
-                match self.get_all_apps().await {
-                    Ok(apps) => Self::find_app_in_list(&apps, &app.url).cloned(),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to fetch existing apps for deduplication: {}. \
-                             Proceeding with create (may create duplicate).",
-                            e
-                        );
-                        None
-                    }
-                }
-            }
-        };
-
-        if let Some(existing_app) = existing {
-            // Update existing app instead of creating duplicate
-            self.update_app(&existing_app.id, app).await?;
-            // Also ensure it's on the board (it might exist but not be on this board)
-            self.add_discovered_app_to_board(&existing_app.id, app, board_name)
-                .await?;
-            return Ok(existing_app.id);
-        }
-
-        // Create new app in Homarr
-        let url = format!("{}/api/trpc/app.create", self.base_url);
-        // Transform icon path and use default if not specified
-        let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));
-        // Auto-derive pingUrl with host.docker.internal for container-to-host health checks
-        let ping_url = derive_ping_url(&app.url);
-
-        let payload = json!({
-            "json": {
-                "name": app.name,
-                "description": app.description.clone().unwrap_or_default(),
-                "iconUrl": icon_url,
-                "href": app.url,
-                "pingUrl": ping_url
-            }
-        });
-
-        let response = self.client.post(&url).json(&payload).send().await?;
-
-        if !response.status().is_success() {
-            let text = response.text().await?;
-            return Err(AdapterError::HomarrApi(format!(
-                "Failed to create app '{}': {}",
-                app.name, text
-            )));
-        }
-
-        let app_response: TrpcResponse<CreateAppResponse> = response.json().await?;
-        let app_id = app_response.result.data.json.app_id;
-
-        // Add to board
-        self.add_discovered_app_to_board(&app_id, app, board_name)
-            .await?;
-
-        tracing::info!("Added app '{}' to Homarr (app_id: {})", app.name, app_id);
-        Ok(app_id)
-    }
-
-    /// Add a discovered app to a board with auto-positioning.
-    /// Skips adding if the app is already on the board (prevents duplicates).
-    async fn add_discovered_app_to_board(
+    /// Add a registry app to a board with layout preferences
+    async fn add_registry_app_to_board(
         &self,
         app_id: &str,
-        app: &DiscoveredApp,
+        app: &AppDefinition,
         board_name: &str,
     ) -> Result<()> {
-        // Get existing items first to check for duplicates
         let board_items = self.get_board_items(board_name).await.unwrap_or_default();
 
-        // Check if this app is already on the board (prevents duplicate tiles)
+        // Check if this app is already on the board
         if board_has_app(&board_items, app_id) {
             tracing::info!(
-                "App '{}' already on board '{}', skipping board item creation",
+                "Registry app '{}' already on board '{}', skipping",
                 app.name,
                 board_name
             );
             return Ok(());
         }
 
-        // Get current board state
         let board = self.get_board_by_name(board_name).await?;
 
         let section_id = board
@@ -718,14 +633,30 @@ impl HomarrClient {
             .map(|l| l.id.clone())
             .unwrap_or_default();
 
-        let (x_offset, y_offset) = self.find_next_position(&board_items, 10); // 10 columns
+        // Get layout preferences from registry
+        let layout = app.effective_layout();
+        let width = layout.width as i32;
+        let height = layout.height as i32;
+
+        // Use explicit position if provided, otherwise auto-position
+        let (x_offset, y_offset) = match (layout.x_offset, layout.y_offset) {
+            (Some(x), Some(y)) => (x as i32, y as i32),
+            _ => self.find_next_position(&board_items, 12), // 12 columns for new layout
+        };
+
+        // Generate a unique ID for this board item
+        // Use container name if available, otherwise use a hash of the URL
+        let item_id = if let Some(container) = app.container_name() {
+            format!("registry-{}", container)
+        } else {
+            format!("registry-{:x}", string_hash(&app.url))
+        };
 
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
 
-        // Build items list with existing items plus the new one
         let mut items: Vec<serde_json::Value> = board_items;
         items.push(json!({
-            "id": format!("discovered-{}", app.container_id),
+            "id": item_id,
             "kind": "app",
             "options": {
                 "appId": app_id
@@ -733,8 +664,8 @@ impl HomarrClient {
             "layouts": [{
                 "layoutId": layout_id,
                 "sectionId": section_id,
-                "width": 1,
-                "height": 1,
+                "width": width,
+                "height": height,
                 "xOffset": x_offset,
                 "yOffset": y_offset
             }],
@@ -754,6 +685,16 @@ impl HomarrClient {
         });
 
         self.client.post(&url).json(&payload).send().await?;
+
+        tracing::debug!(
+            "Added registry app '{}' to board at ({}, {}) size {}x{}",
+            app.name,
+            x_offset,
+            y_offset,
+            width,
+            height
+        );
+
         Ok(())
     }
 

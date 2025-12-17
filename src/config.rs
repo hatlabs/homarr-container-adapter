@@ -26,6 +26,10 @@ pub struct Config {
     #[serde(default = "default_docker_socket")]
     pub docker_socket: String,
 
+    /// Path to app registry directory
+    #[serde(default = "default_registry_dir")]
+    pub registry_dir: String,
+
     /// Enable debug logging
     #[serde(default)]
     pub debug: bool,
@@ -47,6 +51,10 @@ fn default_docker_socket() -> String {
     "/var/run/docker.sock".to_string()
 }
 
+fn default_registry_dir() -> String {
+    "/etc/halos/webapps.d".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -54,6 +62,7 @@ impl Default for Config {
             branding_file: default_branding_file(),
             state_file: default_state_file(),
             docker_socket: default_docker_socket(),
+            registry_dir: default_registry_dir(),
             debug: false,
         }
     }

@@ -33,6 +33,14 @@ pub struct Config {
     /// Enable debug logging
     #[serde(default)]
     pub debug: bool,
+
+    /// Periodic sync interval in seconds (for watch mode)
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval: u64,
+
+    /// Startup delay in seconds before first sync (for watch mode)
+    #[serde(default = "default_startup_delay")]
+    pub startup_delay: u64,
 }
 
 fn default_homarr_url() -> String {
@@ -55,6 +63,14 @@ fn default_registry_dir() -> String {
     "/etc/halos/webapps.d".to_string()
 }
 
+fn default_sync_interval() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_startup_delay() -> u64 {
+    10 // 10 seconds
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -64,6 +80,8 @@ impl Default for Config {
             docker_socket: default_docker_socket(),
             registry_dir: default_registry_dir(),
             debug: false,
+            sync_interval: default_sync_interval(),
+            startup_delay: default_startup_delay(),
         }
     }
 }

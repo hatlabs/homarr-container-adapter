@@ -3,6 +3,7 @@
 //! This service provides:
 //! - First-boot setup: Completes Homarr onboarding with HaLOS branding
 //! - App registry: Syncs apps from /etc/halos/webapps.d/ to Homarr dashboard
+//! - Watch mode: Daemon that monitors Docker events and syncs on changes
 
 mod branding;
 mod config;
@@ -11,8 +12,16 @@ mod homarr;
 mod registry;
 mod state;
 
+use std::collections::HashMap;
+use std::time::Duration;
+
+use bollard::container::ListContainersOptions;
+use bollard::system::EventsOptions;
+use bollard::Docker;
 use clap::{Parser, Subcommand};
-use tracing::{info, warn, Level};
+use futures_util::StreamExt;
+use tokio::time::{interval, sleep};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
@@ -49,6 +58,9 @@ enum Commands {
 
     /// Check adapter status
     Status,
+
+    /// Watch for Docker events and sync continuously (daemon mode)
+    Watch,
 }
 
 #[tokio::main]
@@ -77,6 +89,10 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             check_status(&config).await?;
+        }
+        Commands::Watch => {
+            info!("Starting watch mode (daemon)");
+            run_watch(&config).await?;
         }
     }
 
@@ -206,4 +222,133 @@ async fn check_status(config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Watch mode: monitor Docker events and sync on changes
+async fn run_watch(config: &Config) -> Result<()> {
+    // Wait for startup delay to let Homarr start
+    if config.startup_delay > 0 {
+        info!(
+            "Waiting {} seconds for Homarr to start...",
+            config.startup_delay
+        );
+        sleep(Duration::from_secs(config.startup_delay)).await;
+    }
+
+    // Connect to Docker
+    let docker = Docker::connect_with_socket(
+        &config.docker_socket,
+        120, // timeout in seconds
+        bollard::API_DEFAULT_VERSION,
+    )?;
+
+    // Verify Docker connection
+    match docker.ping().await {
+        Ok(_) => info!("Connected to Docker daemon"),
+        Err(e) => {
+            error!("Failed to connect to Docker: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    // Run initial sync with retry
+    loop {
+        match run_sync(config).await {
+            Ok(_) => {
+                info!("Initial sync completed successfully");
+                break;
+            }
+            Err(e) => {
+                warn!("Initial sync failed: {}. Retrying in 10 seconds...", e);
+                sleep(Duration::from_secs(10)).await;
+            }
+        }
+    }
+
+    // Start watching Docker events and periodic sync
+    info!(
+        "Watching for Docker events, periodic sync every {} seconds",
+        config.sync_interval
+    );
+    watch_loop(config, &docker).await
+}
+
+/// Main watch loop that handles Docker events and periodic syncs
+async fn watch_loop(config: &Config, docker: &Docker) -> Result<()> {
+    let mut sync_timer = interval(Duration::from_secs(config.sync_interval));
+    // Skip the first immediate tick
+    sync_timer.tick().await;
+
+    // Set up Docker event stream with filter for container events
+    let mut filters = HashMap::new();
+    filters.insert("type", vec!["container"]);
+    filters.insert("event", vec!["start", "stop", "die", "destroy"]);
+
+    loop {
+        // Create a fresh event stream for this iteration
+        let options = EventsOptions {
+            since: None,
+            until: None,
+            filters: filters.clone(),
+        };
+        let mut events = docker.events(Some(options));
+
+        tokio::select! {
+            // Handle Docker events
+            Some(event_result) = events.next() => {
+                match event_result {
+                    Ok(event) => {
+                        let action = event.action.as_deref().unwrap_or("unknown");
+                        let actor = event.actor.as_ref();
+                        let container_name = actor
+                            .and_then(|a| a.attributes.as_ref())
+                            .and_then(|attrs| attrs.get("name"))
+                            .map(|s| s.as_str())
+                            .unwrap_or("unknown");
+
+                        info!("Docker event: {} container '{}'", action, container_name);
+
+                        // Brief delay to let container fully start/stop
+                        sleep(Duration::from_secs(2)).await;
+
+                        // Trigger sync
+                        if let Err(e) = run_sync(config).await {
+                            warn!("Sync failed after Docker event: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Docker event stream error: {}. Reconnecting...", e);
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+
+            // Periodic sync timer
+            _ = sync_timer.tick() => {
+                debug!("Periodic sync triggered");
+                if let Err(e) = run_sync(config).await {
+                    warn!("Periodic sync failed: {}", e);
+                }
+            }
+        }
+    }
+}
+
+/// Get the current list of running containers (for debugging)
+#[allow(dead_code)]
+async fn list_containers(docker: &Docker) -> Result<Vec<String>> {
+    let options = ListContainersOptions::<String> {
+        all: false,
+        ..Default::default()
+    };
+
+    let containers = docker.list_containers(Some(options)).await?;
+    let names: Vec<String> = containers
+        .iter()
+        .filter_map(|c| c.names.as_ref())
+        .flat_map(|names| names.iter())
+        .map(|name| name.trim_start_matches('/').to_string())
+        .collect();
+
+    Ok(names)
 }

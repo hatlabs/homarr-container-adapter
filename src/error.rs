@@ -27,6 +27,9 @@ pub enum AdapterError {
 
     #[error("Tracing error: {0}")]
     Tracing(#[from] tracing::subscriber::SetGlobalDefaultError),
+
+    #[error("Docker error: {0}")]
+    Docker(#[from] bollard::errors::Error),
 }
 
 pub type Result<T> = std::result::Result<T, AdapterError>;

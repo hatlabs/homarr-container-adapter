@@ -33,6 +33,12 @@ clap = { version = "4", features = ["derive"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Docker API client for event watching
+bollard = "0.18"
+
+# Async stream utilities
+futures-util = "0.3"
+
 # URL encoding and parsing
 urlencoding = "2"
 url = "2"

@@ -1,5 +1,32 @@
 # homarr-container-adapter - Agent Instructions
 
+## CRITICAL: Build Commands
+
+> **YOU MUST USE THE RUN SCRIPT FOR ALL BUILD AND DEPLOY OPERATIONS.**
+>
+> Do NOT run `cargo build` or `docker` commands directly.
+> Always use `./run <command>` instead.
+
+```bash
+# Cross-compile for ARM64 (Raspberry Pi) - THIS IS THE MAIN BUILD COMMAND
+./run build-arm64
+
+# Build and deploy to test server in one step
+./run deploy-build
+
+# Deploy existing ARM64 build to test server
+./run deploy
+
+# View all available commands
+./run help
+```
+
+**Why this matters:**
+- The target system is ARM64 (Raspberry Pi), not x86_64
+- Direct `cargo build` creates unusable binaries for the target
+- The run script handles Docker-based cross-compilation automatically
+- Deploy commands handle the full workflow: build, copy, install, restart
+
 ## Repository Purpose
 
 Rust service that bridges app definitions with the Homarr dashboard. Two main functions:
@@ -8,7 +35,7 @@ Rust service that bridges app definitions with the Homarr dashboard. Two main fu
 
 ## Key Files
 
-- `src/main.rs` - CLI entry point with setup/sync/status commands
+- `src/main.rs` - CLI entry point with setup/sync/status/watch commands
 - `src/homarr.rs` - Homarr tRPC API client
 - `src/registry.rs` - App registry loader (TOML files)
 - `src/branding.rs` - Parse branding.toml from halos-homarr-branding
@@ -40,14 +67,20 @@ Note: If only one of `x_offset`/`y_offset` is specified, both are auto-calculate
 - `reqwest` with cookies for HTTP
 - `tokio` async runtime
 - `clap` for CLI
+- `bollard` for Docker event streaming (watch mode)
 
-## Build Commands
+## Development Commands
+
+**ALWAYS use the run script:**
 
 ```bash
-cargo build              # Debug build
-cargo build --release    # Release build
-cargo test               # Run tests
-cargo clippy             # Lint
+./run build              # Debug build (native, for local testing only)
+./run build-arm64        # Cross-compile for ARM64 (USE THIS FOR DEPLOYMENT)
+./run test               # Run tests
+./run lint               # Run fmt-check + clippy
+./run deploy-build       # Build ARM64 and deploy to halos.local
+./run logs-follow        # Follow service logs on test server
+./run help               # Show all available commands
 ```
 
 ## Packaging

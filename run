@@ -2,90 +2,218 @@
 #
 # usage: ./run command [argument ...]
 #
-# Commands used during development / CI.
-# Also, executable documentation for project dev practices.
+# Commands for developing homarr-container-adapter.
 #
 # See https://death.andgravity.com/run-sh
 # for an explanation of how it works and why it's useful.
 
+set -o nounset
+set -o pipefail
+set -o errexit
+
+# Change the current directory to the project root.
+PROJECT_ROOT=${0%/*}
+if [[ $0 != $PROJECT_ROOT && $PROJECT_ROOT != "" ]]; then
+  cd "$PROJECT_ROOT"
+fi
+readonly PROJECT_ROOT=$(pwd)
+
+# Store the absolute path to this script (useful for recursion).
+readonly SCRIPT="$PROJECT_ROOT/$(basename "$0")"
+
+# Docker image name for cross-compilation
+readonly DOCKER_IMAGE="homarr-adapter-builder"
+
+# Default deploy target
+readonly DEFAULT_DEPLOY_TARGET="halos.local"
+
 ################################################################################
-# Core Development Commands
+# Build Commands
 
 function build {
-  #@ Build project (debug by default, use --release for release build)
-  #@ Category: Core Development
-  cargo build "$@"
+  #@ Build debug binary (native)
+  #@ Category: Build
+  echo "Building debug binary..."
+  cargo build
 }
 
-function clean {
-  #@ Clean all build artifacts
-  #@ Category: Core Development
-  cargo clean "$@"
+function build-release {
+  #@ Build release binary (native)
+  #@ Category: Build
+  echo "Building release binary..."
+  cargo build --release
 }
 
-function check {
-  #@ Run cargo check and clippy
-  #@ Category: Core Development
-  cargo check --all-targets
-  cargo clippy --all-targets --all-features -- -D warnings
+function build-arm64 {
+  #@ Cross-compile release binary for ARM64 (aarch64-unknown-linux-gnu)
+  #@ Category: Build
+  echo "Cross-compiling for ARM64..."
+
+  # Ensure Docker image exists
+  if ! docker image inspect "$DOCKER_IMAGE" &>/dev/null; then
+    echo "Docker image not found. Building..."
+    docker-build-image
+  fi
+
+  docker run --rm -v "$(pwd):/build" "$DOCKER_IMAGE" \
+    cargo build --release --target aarch64-unknown-linux-gnu
+
+  echo ""
+  echo "Binary built at: target/aarch64-unknown-linux-gnu/release/homarr-container-adapter"
+}
+
+function docker-build-image {
+  #@ Build the Docker image for ARM64 cross-compilation
+  #@ Category: Build
+  echo "Building Docker cross-compilation image..."
+  docker build -t "$DOCKER_IMAGE" -f docker/Dockerfile.debtools .
+}
+
+################################################################################
+# Test Commands
+
+function test {
+  #@ Run all tests
+  #@ Category: Test
+  echo "Running tests..."
+  cargo test
+}
+
+function test-unit {
+  #@ Run unit tests only (faster)
+  #@ Category: Test
+  echo "Running unit tests..."
+  cargo test --lib
+}
+
+function clippy {
+  #@ Run clippy linter
+  #@ Category: Test
+  echo "Running clippy..."
+  cargo clippy
 }
 
 function fmt {
   #@ Format code with rustfmt
-  #@ Category: Core Development
+  #@ Category: Test
+  echo "Formatting code..."
   cargo fmt
 }
 
 function fmt-check {
-  #@ Check code formatting without making changes
-  #@ Category: Core Development
+  #@ Check code formatting without modifying
+  #@ Category: Test
+  echo "Checking code formatting..."
   cargo fmt --check
 }
 
-################################################################################
-# Testing Commands
+function check {
+  #@ Run cargo check (fast compilation check)
+  #@ Category: Test
+  echo "Running cargo check..."
+  cargo check
+}
 
-function test {
-  #@ Run all tests
-  #@ Category: Testing
-  cargo test --all-features "$@"
+function lint {
+  #@ Run all linting checks (fmt-check + clippy)
+  #@ Category: Test
+  echo "Running all linting checks..."
+  cargo fmt --check
+  cargo clippy
 }
 
 ################################################################################
-# Development Setup
+# Deploy Commands
+
+function deploy {
+  #@ Deploy ARM64 binary to test server (default: halos.local)
+  #@ Usage: ./run deploy [target_host]
+  #@ Category: Deploy
+  local target="${1:-$DEFAULT_DEPLOY_TARGET}"
+
+  echo "Deploying to $target..."
+
+  # Build if needed
+  local binary="target/aarch64-unknown-linux-gnu/release/homarr-container-adapter"
+  if [ ! -f "$binary" ]; then
+    echo "Binary not found. Building..."
+    build-arm64
+  fi
+
+  echo "Copying binary to $target..."
+  scp "$binary" "$target:/tmp/"
+
+  echo "Installing binary and restarting service..."
+  ssh "$target" "sudo systemctl stop homarr-container-adapter && \
+    sudo cp /tmp/homarr-container-adapter /usr/bin/ && \
+    sudo chmod +x /usr/bin/homarr-container-adapter && \
+    sudo systemctl start homarr-container-adapter"
+
+  echo ""
+  echo "Deployment complete. Checking service status..."
+  ssh "$target" "sudo systemctl status homarr-container-adapter --no-pager"
+}
+
+function deploy-build {
+  #@ Build ARM64 and deploy to test server
+  #@ Usage: ./run deploy-build [target_host]
+  #@ Category: Deploy
+  local target="${1:-$DEFAULT_DEPLOY_TARGET}"
+
+  build-arm64
+  deploy "$target"
+}
+
+function logs {
+  #@ Show service logs from test server
+  #@ Usage: ./run logs [target_host] [lines]
+  #@ Category: Deploy
+  local target="${1:-$DEFAULT_DEPLOY_TARGET}"
+  local lines="${2:-50}"
+
+  echo "Fetching logs from $target..."
+  ssh "$target" "sudo journalctl -u homarr-container-adapter -n $lines --no-pager"
+}
+
+function logs-follow {
+  #@ Follow service logs from test server
+  #@ Usage: ./run logs-follow [target_host]
+  #@ Category: Deploy
+  local target="${1:-$DEFAULT_DEPLOY_TARGET}"
+
+  echo "Following logs from $target (Ctrl+C to stop)..."
+  ssh "$target" "sudo journalctl -u homarr-container-adapter -f"
+}
+
+function status {
+  #@ Show service status on test server
+  #@ Usage: ./run status [target_host]
+  #@ Category: Deploy
+  local target="${1:-$DEFAULT_DEPLOY_TARGET}"
+
+  ssh "$target" "sudo systemctl status homarr-container-adapter --no-pager"
+}
+
+################################################################################
+# Development Commands
 
 function hooks-install {
-  #@ Install pre-commit hooks using lefthook
-  #@ Category: Development Setup
-  if ! command -v lefthook &> /dev/null; then
-    echo "Error: lefthook not found. Install with: brew install lefthook"
+  #@ Install git pre-commit hooks (lefthook)
+  #@ Category: Development
+  echo "Installing git hooks..."
+  if command -v lefthook &>/dev/null; then
+    lefthook install
+  else
+    echo "lefthook not installed. Install with: brew install lefthook"
     exit 1
   fi
-  lefthook install
-  echo "✅ Pre-commit hooks installed"
 }
 
-function hooks-run {
-  #@ Run pre-commit hooks manually
-  #@ Category: Development Setup
-  if ! command -v lefthook &> /dev/null; then
-    echo "Error: lefthook not found. Install with: brew install lefthook"
-    exit 1
-  fi
-  lefthook run pre-commit
-}
-
-################################################################################
-# CI/CD Commands
-
-function ci-check {
-  #@ Run CI verification checks (format, lint, test)
-  #@ Category: CI/CD
-  echo "🔍 Running CI checks..."
-  fmt-check
-  check
-  test
-  echo "✅ All CI checks passed"
+function clean {
+  #@ Clean build artifacts
+  #@ Category: Development
+  echo "Cleaning build artifacts..."
+  cargo clean
 }
 
 ################################################################################
@@ -93,9 +221,10 @@ function ci-check {
 
 function help {
   #@ Show this help message
-  #@ Category: Help
-  echo "Available commands:"
+  #@ Category: Core
+  echo "homarr-container-adapter development commands"
   echo ""
+  echo "Available commands:"
 
   # Extract function definitions and their help comments
   awk '/^function / {
@@ -106,14 +235,17 @@ function help {
       desc = $0
       sub(/.*#@ /, "", desc)
       sub(/ *$/, "", desc)
-      getline
-      if ($0 ~ /#@ Category:/) {
-        cat = $0
-        sub(/.*Category: /, "", cat)
-        sub(/ *$/, "", cat)
-        if (!seen[cat]++) categories[++cat_count] = cat
-        commands[cat, ++cmd_count[cat]] = fname
-        descriptions[cat, cmd_count[cat]] = desc
+      # Skip any additional #@ lines until we find Category
+      while (getline > 0 && $0 ~ /#@/) {
+        if ($0 ~ /#@ Category:/) {
+          cat = $0
+          sub(/.*Category: /, "", cat)
+          sub(/ *$/, "", cat)
+          if (!seen[cat]++) categories[++cat_count] = cat
+          commands[cat, ++cmd_count[cat]] = fname
+          descriptions[cat, cmd_count[cat]] = desc
+          break
+        }
       }
     }
   }
@@ -129,29 +261,16 @@ function help {
 
   echo ""
   echo "Usage: ./run <command> [arguments...]"
+  echo ""
+  echo "Examples:"
+  echo "  ./run build-arm64      # Cross-compile for Raspberry Pi"
+  echo "  ./run deploy           # Deploy to halos.local"
+  echo "  ./run deploy-build     # Build and deploy in one step"
+  echo "  ./run logs-follow      # Watch service logs"
 }
 
 ################################################################################
-# Main dispatcher
+# Commands end.
 
-# If no arguments provided, show help
-if [ $# -eq 0 ]; then
-  help
-  exit 0
-fi
-
-# Get the command name
-cmd=$1
-shift
-
-# Check if function exists
-if declare -f "$cmd" > /dev/null; then
-  # Run the command with timing
-  TIMEFORMAT=$'\nTask completed in %3lR'
-  time "$cmd" "$@"
-else
-  echo "Error: Unknown command '$cmd'"
-  echo
-  echo "Run './run help' to see available commands"
-  exit 1
-fi
+TIMEFORMAT=$'\nTask completed in %3lR'
+time "${@:-help}"

@@ -184,6 +184,8 @@ impl HomarrClient {
         let client = Client::builder()
             .cookie_store(true)
             .cookie_provider(jar)
+            // Accept self-signed certificates (required for local SSL configurations)
+            .danger_accept_invalid_certs(true)
             .build()?;
 
         Ok(Self {

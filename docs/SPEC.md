@@ -20,12 +20,20 @@ The homarr-container-adapter is a Rust service that bridges Docker container met
 - FR-1.6: Set dashboard as home board
 - FR-1.7: Apply theme color scheme
 
-#### Container Discovery (FR-2)
+#### Container Discovery and Multi-Board Sync (FR-2)
 - FR-2.1: Monitor Docker daemon for container changes
 - FR-2.2: Parse `homarr.*` labels from containers
-- FR-2.3: Add discovered apps to Homarr dashboard
-- FR-2.4: Respect user removal decisions (don't re-add removed apps)
-- FR-2.5: Track sync state persistently
+- FR-2.3: Create discovered apps in Homarr's global app registry
+- FR-2.4: Discover all boards the sync user has write access to
+- FR-2.5: Add discovered apps to all writable boards
+- FR-2.6: Track app removals per-board (removing from Board A doesn't affect Board B)
+- FR-2.7: Track sync state persistently
+
+#### Seed Database Users (FR-3)
+- FR-3.1: Create `halos-sync` user as service account for API key ownership
+- FR-3.2: Create `admin` user for human admin OIDC login
+- FR-3.3: Both users belong to admins group with full board access
+- FR-3.4: Bootstrap API key is owned by halos-sync user (rotated on first boot)
 
 ### Non-Functional Requirements
 
@@ -77,6 +85,18 @@ state_file = "/var/lib/homarr-container-adapter/state.json"
 # Docker socket path
 docker_socket = "/var/run/docker.sock"
 
+# Bootstrap API key file (from halos-homarr-branding package)
+bootstrap_api_key_file = "/etc/halos-homarr-branding/bootstrap-api-key"
+
+# Authelia users database file
+authelia_users_db = "/var/lib/container-apps/halos-authelia-container/data/users_database.yml"
+
+# Periodic sync interval in seconds (for watch mode)
+sync_interval = 15
+
+# Startup delay in seconds before first sync (for watch mode)
+startup_delay = 10
+
 # Enable debug logging
 debug = false
 ```
@@ -84,50 +104,6 @@ debug = false
 ### Branding Configuration
 
 See halos-homarr-branding package for branding configuration schema.
-
-## API Interactions
-
-The adapter uses Homarr's tRPC API (not REST). Key endpoints:
-
-### Onboarding
-- `GET /api/trpc/onboard.currentStep` - Get current step
-- `POST /api/trpc/onboard.nextStep` - Advance to next step
-- `POST /api/trpc/user.initUser` - Create initial user
-- `POST /api/trpc/serverSettings.initSettings` - Configure settings
-
-### Authentication
-- `GET /api/auth/csrf` - Get CSRF token
-- `POST /api/auth/callback/credentials` - Login with credentials
-
-### Board Management
-- `GET /api/trpc/board.getBoardByName` - Get board by name
-- `POST /api/trpc/board.createBoard` - Create new board
-- `POST /api/trpc/board.saveBoard` - Save board with items
-- `POST /api/trpc/board.setHomeBoard` - Set home board
-
-### App Management
-- `POST /api/trpc/app.create` - Create app
-- `GET /api/trpc/app.all` - List all apps
-
-## State Management
-
-The adapter maintains state in a JSON file:
-
-```json
-{
-  "version": "1.0",
-  "first_boot_completed": true,
-  "removed_apps": ["container-id-1", "container-id-2"],
-  "last_sync": "2025-01-15T10:30:00Z",
-  "discovered_apps": {
-    "container-id": {
-      "name": "Signal K",
-      "url": "http://localhost:3000",
-      "added_at": "2025-01-15T10:30:00Z"
-    }
-  }
-}
-```
 
 ## CLI Interface
 
@@ -155,6 +131,7 @@ Options:
 
 ## Security Considerations
 
-- Credentials stored in branding config (file permissions: 600)
-- Session cookies handled in-memory only
-- Docker socket access required (add to docker group)
+- **API Key Storage**: Permanent API key stored in state file (file permissions: 600)
+- **Bootstrap Key**: Well-known bootstrap key rotated on first boot (window of vulnerability: seconds)
+- **No Credentials Login**: Homarr runs with `AUTH_PROVIDERS="oidc"` only
+- **Docker Socket**: Access required (add to docker group)

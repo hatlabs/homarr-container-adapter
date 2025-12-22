@@ -28,7 +28,7 @@ homarr_url = "http://localhost:7575"
 
 # Periodic sync interval in seconds (for watch mode)
 # Docker events trigger immediate syncs, this is a fallback
-# Default: 300 (5 minutes)
+# Default: 300 seconds (5 minutes)
 # sync_interval = 300
 
 # Startup delay in seconds before first sync (for watch mode)

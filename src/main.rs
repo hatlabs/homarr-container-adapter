@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{AdapterError, Result};
 
 #[derive(Parser)]
 #[command(name = "homarr-container-adapter")]
@@ -44,6 +44,13 @@ struct Cli {
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
+
+    /// Reset state before running command
+    ///
+    /// Clears all persistent state including API key, sync history, and
+    /// removal tracking. Useful for testing or recovering from corrupted state.
+    #[arg(long)]
+    reset_state: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -79,6 +86,11 @@ async fn main() -> Result<()> {
     // Load config
     let config = Config::load(&cli.config)?;
 
+    // Handle --reset-state flag
+    if cli.reset_state {
+        reset_state(&config)?;
+    }
+
     match cli.command {
         Commands::Sync => {
             info!("Running sync cycle");
@@ -111,12 +123,30 @@ async fn run_sync(config: &Config) -> Result<()> {
         state = state::State::load(&config.state_file)?;
     }
 
-    // Load branding
-    let branding = branding::BrandingConfig::load(&config.branding_file)?;
+    // Create client and set up authentication
+    let mut client = homarr::HomarrClient::new(&config.homarr_url)?;
+    ensure_authenticated(&mut client, config, &mut state).await?;
 
-    // Create client and login
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
-    client.ensure_logged_in(&branding).await?;
+    // Discover writable boards
+    let writable_boards = client.get_writable_boards().await.unwrap_or_else(|e| {
+        warn!("Failed to fetch writable boards: {}", e);
+        vec![]
+    });
+
+    if writable_boards.is_empty() {
+        warn!("No writable boards found, skipping sync");
+        return Ok(());
+    }
+
+    info!(
+        "Found {} writable board(s): {}",
+        writable_boards.len(),
+        writable_boards
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     // Pre-fetch existing apps for efficient deduplication
     let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
@@ -124,42 +154,65 @@ async fn run_sync(config: &Config) -> Result<()> {
         vec![]
     });
 
-    // Load and sync registry apps
+    // Load registry apps
     info!("Loading apps from registry: {}", config.registry_dir);
     let registry_apps = registry::load_all_apps(&config.registry_dir).unwrap_or_else(|e| {
         warn!("Failed to load registry apps: {}", e);
         vec![]
     });
 
-    let mut synced_count = 0;
-    for entry in &registry_apps {
-        if state.is_removed(&entry.app.url) {
-            info!(
-                "Registry app '{}' was removed by user, skipping",
-                entry.app.name
-            );
-            continue;
-        }
+    // Filter to visible apps only
+    let visible_apps: Vec<_> = registry_apps
+        .iter()
+        .filter(|e| e.app.is_visible())
+        .collect();
+    let hidden_count = registry_apps.len() - visible_apps.len();
+    if hidden_count > 0 {
+        debug!(
+            "Filtered out {} hidden app(s) from {} total",
+            hidden_count,
+            registry_apps.len()
+        );
+    }
 
-        match client
-            .add_registry_app(&entry.app, &branding.board.name, Some(&existing_apps))
-            .await
-        {
-            Ok(_) => {
-                // Track in state (use empty container_id for non-container apps)
-                let container_id = entry.app.container_name().unwrap_or("").to_string();
-                state.discovered_apps.insert(
-                    entry.app.url.clone(),
-                    state::DiscoveredApp {
-                        name: entry.app.name.clone(),
-                        container_id,
-                        added_at: chrono::Utc::now(),
-                    },
+    // Sync each visible app to each writable board
+    let mut synced_count = 0;
+    for entry in &visible_apps {
+        // Track app in discovered_apps (once per app, not per board)
+        let container_id = entry.app.container_name().unwrap_or("").to_string();
+        state.discovered_apps.insert(
+            entry.app.url.clone(),
+            state::DiscoveredApp {
+                name: entry.app.name.clone(),
+                container_id,
+                added_at: chrono::Utc::now(),
+            },
+        );
+
+        // Sync to each writable board
+        for board in &writable_boards {
+            // Check if app was removed from this specific board
+            if state.is_removed_from_board(&board.id, &entry.app.url) {
+                debug!(
+                    "App '{}' was removed from board '{}', skipping",
+                    entry.app.name, board.name
                 );
-                synced_count += 1;
+                continue;
             }
-            Err(e) => {
-                warn!("Failed to add registry app '{}': {}", entry.app.name, e);
+
+            match client
+                .add_registry_app(&entry.app, &board.name, Some(&existing_apps))
+                .await
+            {
+                Ok(_) => {
+                    synced_count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to add app '{}' to board '{}': {}",
+                        entry.app.name, board.name, e
+                    );
+                }
             }
         }
     }
@@ -167,7 +220,60 @@ async fn run_sync(config: &Config) -> Result<()> {
     state.update_sync_time();
     state.save(&config.state_file)?;
 
-    info!("Sync complete: {} apps synced from registry", synced_count);
+    info!(
+        "Sync complete: {} visible app(s), {} app-board combinations synced",
+        visible_apps.len(),
+        synced_count
+    );
+    Ok(())
+}
+
+/// Ensure the Homarr client is authenticated with a valid API key.
+///
+/// If a permanent API key is stored in state, use it.
+/// Otherwise, rotate from the bootstrap API key to a new permanent key.
+async fn ensure_authenticated(
+    client: &mut homarr::HomarrClient,
+    config: &Config,
+    state: &mut state::State,
+) -> Result<()> {
+    use std::fs;
+
+    // Check if we already have a permanent API key
+    if let Some(ref api_key) = state.api_key {
+        info!("Using stored API key for authentication");
+        client.set_api_key(api_key.clone());
+        return Ok(());
+    }
+
+    // No permanent key - need to rotate from bootstrap key
+    info!("No permanent API key found, rotating from bootstrap key");
+
+    // Read bootstrap key from file
+    let bootstrap_key = fs::read_to_string(&config.bootstrap_api_key_file)
+        .map_err(|e| {
+            AdapterError::Config(format!(
+                "Failed to read bootstrap API key from {}: {}",
+                config.bootstrap_api_key_file, e
+            ))
+        })?
+        .trim()
+        .to_string();
+
+    if bootstrap_key.is_empty() {
+        return Err(AdapterError::Config(
+            "Bootstrap API key file is empty".to_string(),
+        ));
+    }
+
+    // Rotate to permanent key
+    let permanent_key = client.rotate_api_key(&bootstrap_key).await?;
+
+    // Save the permanent key to state
+    state.api_key = Some(permanent_key.clone());
+    state.save(&config.state_file)?;
+
+    info!("API key rotation complete, permanent key saved to state");
     Ok(())
 }
 
@@ -176,9 +282,15 @@ async fn run_setup(config: &Config) -> Result<()> {
     let branding = branding::BrandingConfig::load(&config.branding_file)?;
 
     // Create Homarr client
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    let mut client = homarr::HomarrClient::new(&config.homarr_url)?;
 
-    // Check onboarding status
+    // Load state
+    let mut state = state::State::load(&config.state_file).unwrap_or_default();
+
+    // Ensure we have a valid API key (rotate from bootstrap if needed)
+    ensure_authenticated(&mut client, config, &mut state).await?;
+
+    // Check onboarding status (should already be complete from seed database)
     let step = client.get_onboarding_step().await?;
     info!("Current onboarding step: {:?}", step);
 
@@ -187,12 +299,9 @@ async fn run_setup(config: &Config) -> Result<()> {
         client.complete_onboarding(&branding).await?;
     }
 
-    // Login and create default board
+    // Set up default board
     info!("Setting up default board");
     client.setup_default_board(&branding).await?;
-
-    // Load state to check if Authelia sync is needed
-    let mut state = state::State::load(&config.state_file).unwrap_or_default();
 
     // Sync credentials to Authelia if not already done
     if !state.authelia_sync_completed {
@@ -276,6 +385,33 @@ async fn check_status(config: &Config) -> Result<()> {
         }
     } else {
         println!("Status: First-boot setup pending");
+    }
+
+    Ok(())
+}
+
+/// Reset adapter state to initial values
+///
+/// Removes the state file, clearing:
+/// - API key (will be re-rotated from bootstrap key)
+/// - First-boot completion flag (will re-run setup)
+/// - Authelia sync flag
+/// - Discovered apps tracking
+/// - Removed apps tracking
+/// - Last sync timestamp
+fn reset_state(config: &Config) -> Result<()> {
+    use std::path::Path;
+
+    let state_path = Path::new(&config.state_file);
+
+    if state_path.exists() {
+        std::fs::remove_file(state_path)?;
+        info!("State file removed: {}", config.state_file);
+    } else {
+        info!(
+            "State file does not exist, nothing to reset: {}",
+            config.state_file
+        );
     }
 
     Ok(())

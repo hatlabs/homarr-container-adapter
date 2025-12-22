@@ -92,7 +92,7 @@ bootstrap_api_key_file = "/etc/halos-homarr-branding/bootstrap-api-key"
 authelia_users_db = "/var/lib/container-apps/halos-authelia-container/data/users_database.yml"
 
 # Periodic sync interval in seconds (for watch mode)
-sync_interval = 300
+sync_interval = 15
 
 # Startup delay in seconds before first sync (for watch mode)
 startup_delay = 10

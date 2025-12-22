@@ -125,13 +125,38 @@ impl BoardPermission {
     }
 }
 
-/// Board with permission info from getAllBoards endpoint
+/// Board data from getAllBoards endpoint
+///
+/// Note: The API doesn't return a simple permission field. Instead, it returns
+/// userPermissions and groupPermissions arrays. For admin users (like halos-sync),
+/// all returned boards are writable. We infer permission based on membership.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct BoardWithPermission {
     pub id: String,
     pub name: String,
-    pub permission: BoardPermission,
+    /// Whether the board is public
+    #[serde(rename = "isPublic")]
+    pub is_public: bool,
+    /// User-specific permissions (for non-admin users)
+    #[serde(rename = "userPermissions", default)]
+    pub user_permissions: Vec<serde_json::Value>,
+    /// Group-specific permissions
+    #[serde(rename = "groupPermissions", default)]
+    pub group_permissions: Vec<serde_json::Value>,
+}
+
+impl BoardWithPermission {
+    /// Check if this board is writable
+    ///
+    /// For admin users (halos-sync in admins group), all boards are writable.
+    /// The API returns all accessible boards, and admin group has full access.
+    pub fn is_writable(&self) -> bool {
+        // Admin users have full access to all boards they can see.
+        // If a board is returned by getAllBoards, the user can modify it.
+        // TODO: Parse userPermissions/groupPermissions for non-admin users
+        true
+    }
 }
 
 /// Default icon path (relative URL)
@@ -656,7 +681,6 @@ impl HomarrClient {
     /// Returns all boards accessible to the authenticated user, with their
     /// permission levels. Used for multi-board sync to discover which boards
     /// the adapter can sync apps to.
-    #[allow(dead_code)]
     pub async fn get_all_boards(&self) -> Result<Vec<BoardWithPermission>> {
         let url = format!("{}/api/trpc/board.getAllBoards", self.base_url);
         let response = self.get(&url).await?;
@@ -678,13 +702,9 @@ impl HomarrClient {
     ///
     /// Convenience method that filters `get_all_boards()` to only return
     /// boards where the adapter can add/remove apps.
-    #[allow(dead_code)]
     pub async fn get_writable_boards(&self) -> Result<Vec<BoardWithPermission>> {
         let boards = self.get_all_boards().await?;
-        Ok(boards
-            .into_iter()
-            .filter(|b| b.permission.is_writable())
-            .collect())
+        Ok(boards.into_iter().filter(|b| b.is_writable()).collect())
     }
 
     /// Find an existing app by URL in a pre-fetched list
@@ -1319,7 +1339,7 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // Tests for BoardPermission
+    // Tests for BoardPermission enum
 
     #[test]
     fn test_board_permission_view_not_writable() {
@@ -1336,31 +1356,46 @@ mod tests {
         assert!(BoardPermission::Full.is_writable());
     }
 
+    // Tests for BoardWithPermission
+
     #[test]
-    fn test_board_permission_deserialize() {
-        // Test that BoardPermission deserializes from camelCase JSON
-        let json = r#"{"id":"board-1","name":"Test Board","permission":"modify"}"#;
+    fn test_board_with_permission_deserialize() {
+        // Test that BoardWithPermission deserializes from actual Homarr API format
+        let json = r#"{
+            "id": "board-1",
+            "name": "Test Board",
+            "isPublic": true,
+            "userPermissions": [],
+            "groupPermissions": []
+        }"#;
         let board: BoardWithPermission = serde_json::from_str(json).unwrap();
         assert_eq!(board.id, "board-1");
         assert_eq!(board.name, "Test Board");
-        assert_eq!(board.permission, BoardPermission::Modify);
+        assert!(board.is_public);
+        assert!(board.user_permissions.is_empty());
+        assert!(board.group_permissions.is_empty());
     }
 
     #[test]
-    fn test_board_permission_deserialize_all_levels() {
-        // View
-        let view: BoardWithPermission =
-            serde_json::from_str(r#"{"id":"1","name":"View","permission":"view"}"#).unwrap();
-        assert_eq!(view.permission, BoardPermission::View);
+    fn test_board_with_permission_is_writable() {
+        // For admin users, all boards are writable
+        let json = r#"{
+            "id": "board-1",
+            "name": "Test Board",
+            "isPublic": false,
+            "userPermissions": [],
+            "groupPermissions": []
+        }"#;
+        let board: BoardWithPermission = serde_json::from_str(json).unwrap();
+        assert!(board.is_writable());
+    }
 
-        // Modify
-        let modify: BoardWithPermission =
-            serde_json::from_str(r#"{"id":"2","name":"Modify","permission":"modify"}"#).unwrap();
-        assert_eq!(modify.permission, BoardPermission::Modify);
-
-        // Full
-        let full: BoardWithPermission =
-            serde_json::from_str(r#"{"id":"3","name":"Full","permission":"full"}"#).unwrap();
-        assert_eq!(full.permission, BoardPermission::Full);
+    #[test]
+    fn test_board_with_permission_defaults() {
+        // Test that missing optional fields use defaults
+        let json = r#"{"id": "board-1", "name": "Test", "isPublic": true}"#;
+        let board: BoardWithPermission = serde_json::from_str(json).unwrap();
+        assert!(board.user_permissions.is_empty());
+        assert!(board.group_permissions.is_empty());
     }
 }

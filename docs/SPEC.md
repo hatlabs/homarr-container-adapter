@@ -81,7 +81,7 @@ docker_socket = "/var/run/docker.sock"
 bootstrap_api_key_file = "/etc/halos-homarr-branding/bootstrap-api-key"
 
 # Authelia users database file
-authelia_users_db = "/var/lib/container-apps/authelia-container/data/users_database.yml"
+authelia_users_db = "/var/lib/container-apps/halos-authelia-container/data/users_database.yml"
 
 # Periodic sync interval in seconds (for watch mode)
 sync_interval = 300
@@ -109,7 +109,7 @@ The adapter uses Homarr's tRPC API (not REST). Key endpoints:
 
 ### Authentication (API Key)
 
-The adapter uses API key authentication via the `Authorization: Bearer <api_key>` header.
+The adapter uses API key authentication via the `ApiKey: <api_key>` header (Homarr's OpenAPI format).
 This allows Homarr to run with `AUTH_PROVIDERS="oidc"` (no credentials login).
 
 **API Key Rotation Flow (First Boot):**

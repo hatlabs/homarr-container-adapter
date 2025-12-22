@@ -205,7 +205,7 @@ impl HomarrClient {
 
     /// Set the API key for authentication
     ///
-    /// When set, all requests will include the `Authorization: Bearer <api_key>` header.
+    /// When set, all requests will include the `ApiKey: <api_key>` header.
     pub fn set_api_key(&mut self, api_key: String) {
         self.api_key = Some(api_key);
     }
@@ -214,7 +214,7 @@ impl HomarrClient {
     async fn get(&self, url: &str) -> reqwest::Result<reqwest::Response> {
         let mut request = self.client.get(url);
         if let Some(ref api_key) = self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
+            request = request.header("ApiKey", api_key);
         }
         request.send().await
     }
@@ -227,7 +227,7 @@ impl HomarrClient {
     ) -> reqwest::Result<reqwest::Response> {
         let mut request = self.client.post(url).json(body);
         if let Some(ref api_key) = self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
+            request = request.header("ApiKey", api_key);
         }
         request.send().await
     }
@@ -240,7 +240,7 @@ impl HomarrClient {
     ) -> reqwest::Result<reqwest::Response> {
         let mut request = self.client.post(url).form(form);
         if let Some(ref api_key) = self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
+            request = request.header("ApiKey", api_key);
         }
         request.send().await
     }

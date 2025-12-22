@@ -72,7 +72,7 @@ fn default_registry_dir() -> String {
 }
 
 fn default_authelia_users_db() -> String {
-    "/var/lib/container-apps/authelia-container/data/users_database.yml".to_string()
+    "/var/lib/container-apps/halos-authelia-container/data/users_database.yml".to_string()
 }
 
 fn default_bootstrap_api_key_file() -> String {
